@@ -10,7 +10,9 @@
  *               A5 custom_plain_and_namespaced_tools_in_one_request
  *                  a_namespaced_custom_tool_is_served_as_strata_serves_it (offer, reply, stream,
  *                  history)
- *   Strata      the_same_requests_answer_as_strata_does (every Strata custom case, normalised)
+ *   Strata      the_same_requests_answer_as_strata_does (every Strata custom case and the
+ *               follow-ups: result order, tool_choice, function offers, additional_tools,
+ *               Codex's local compaction; the named deviations normalised)
  *               A6 tool_choice_auto_required_none_and_the_custom_form
  *               A7 parallel_tool_calls_passes_through_both_ways
  *   B reply     B1 a_custom_call_comes_back_as_a_custom_tool_call_item
@@ -27,10 +29,12 @@
  *               D2 custom_and_function_history_interleave
  *               D3 several_round_trips_of_history
  *               D4 unmatched_and_repeated_call_ids_are_passed_through
+ *                  each_turns_results_are_put_in_its_calls_order (Strata's result order)
+ *                  codexs_local_compaction_turn_is_served (codex 0.167, a custom provider)
  *               D5 previous_response_id_is_still_refused
  *   E errors    E1 a_custom_tool_needs_a_name
  *               E2 other_tool_types_are_still_left_out
- *               E3 tool_choice_naming_no_offered_tool
+ *               E3 tool_choice_naming_no_offered_tool (acts as "auto", as in Strata)
  *               E4 a_malformed_custom_tool_call_item_is_refused
  *   F regress   F1/F2 function_and_chat_tool_replies_are_as_in_1_17_0 (golden from 19d4e8fe0e18)
  */
@@ -132,6 +136,47 @@ std::string normalize(std::string s) {
     s = std::regex_replace(s, timings, "\"timings\":{}");
     return s;
 }
+/* A /v1/chat/completions stream sends a call's arguments in the chunks the engine's timing makes
+ * ("{" then the rest, or all at once: the fake engine's pace varies under load), so the goldens
+ * compare a stream with each run of argument chunks of one call joined into one chunk: the bytes
+ * and their order still count, the chunk boundaries do not. Other events are compared as sent. */
+std::string join_argument_chunks(const std::string& s) {
+    std::string out;
+    json held;   /* the argument chunk being joined, or null */
+    auto args_of = [](const json& c) -> const json* {
+        if (!c.is_object() || !c.contains("choices") || c["choices"].size() != 1) return nullptr;
+        const json& d = c["choices"][0]["delta"];
+        if (!d.is_object() || d.size() != 1 || !d.contains("tool_calls") || d["tool_calls"].size() != 1) return nullptr;
+        const json& t = d["tool_calls"][0];
+        if (t.size() != 2 || !t.contains("index") || !t.contains("function") || t["function"].size() != 1 ||
+            !t["function"].contains("arguments"))
+            return nullptr;
+        return &t;
+    };
+    auto flush = [&]() {
+        if (!held.is_null()) out += "data: " + held.dump() + "\n\n";
+        held = json();
+    };
+    size_t at = 0;
+    while (at < s.size()) {
+        size_t end = s.find("\n\n", at);
+        const std::string block = s.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        at = end == std::string::npos ? s.size() : end + 2;
+        const json c = block.rfind("data: {", 0) == 0 ? json::parse(block.substr(6), nullptr, false) : json();
+        const json* t = args_of(c);
+        if (t && !held.is_null() && (*args_of(held))["index"] == (*t)["index"]) {
+            json& a = held["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"];
+            a = a.get<std::string>() + (*t)["function"]["arguments"].get<std::string>();
+            continue;
+        }
+        flush();
+        if (t) { held = c; continue; }
+        out += block + (end == std::string::npos ? "" : "\n\n");
+    }
+    flush();
+    return out;
+}
+
 std::map<std::string, std::string> goldens() {
     std::map<std::string, std::string> g;
     const std::string t = read_fixture("responses-function-golden-1.17.0.txt");
@@ -761,9 +806,9 @@ TEST(several_round_trips_of_history) {
     f.sched.join_all();
 }
 
-/* Radiance matches no call ids (Strata does not refuse them either): an output with no
- * call, a call with no call_id and a repeated call_id all pass through to the chat request as
- * sent, the same as for function calls. */
+/* No call id is refused (Strata does not refuse them either): an output with no call, a call
+ * with no call_id and a repeated call_id all pass through to the chat request, the same as for
+ * function calls. (Ids do order a turn's results: each_turns_results_are_put_in_its_calls_order.) */
 TEST(unmatched_and_repeated_call_ids_are_passed_through) {
     const Conv orphan = convert(R"({"input":[{"role":"user","content":"x"},
         {"type":"custom_tool_call_output","call_id":"nobody","output":"?"}]})");
@@ -780,6 +825,76 @@ TEST(unmatched_and_repeated_call_ids_are_passed_through) {
     const Conv fn = convert(R"({"input":[{"role":"user","content":"x"},
         {"type":"function_call_output","call_id":"nobody","output":"?"}]})");
     CHECK_EQ(fn.rc, orphan.rc);
+}
+
+/* As Strata (_order_tool_results): the template places results by position, so each run of results
+ * is put in the order of the calls of the turn before it, by call id; a result no call of that
+ * turn has keeps its place after them. Function and custom results alike. */
+TEST(each_turns_results_are_put_in_its_calls_order) {
+    const Conv c = convert(R"({"input":[{"role":"user","content":"go"},
+        {"type":"function_call","call_id":"a","name":"exec_command","arguments":"{}"},
+        {"type":"custom_tool_call","call_id":"b","name":"apply_patch","input":"p"},
+        {"type":"function_call","call_id":"c","name":"exec_command","arguments":"{}"},
+        {"type":"function_call_output","call_id":"stray","output":"?"},
+        {"type":"function_call_output","call_id":"c","output":"3"},
+        {"type":"custom_tool_call_output","call_id":"b","output":"2"},
+        {"type":"function_call_output","call_id":"a","output":"1"},
+        {"role":"user","content":"next"},
+        {"type":"function_call_output","call_id":"z","output":"9"},
+        {"type":"function_call_output","call_id":"y","output":"8"}]})");
+    CHECK_OK(c.rc);
+    std::vector<std::string> order;
+    for (const json& m : c.chat["messages"])
+        if (m.value("role", "") == "tool") order.push_back(m.value("tool_call_id", ""));
+    CHECK_EQ(json(order).dump(), std::string(R"(["a","b","c","stray","z","y"])"));
+    /* a turn already in order is unchanged, and so is the conversation around it */
+    const Conv same = convert(R"({"input":[{"role":"user","content":"go"},
+        {"type":"function_call","call_id":"a","name":"f","arguments":"{}"},
+        {"type":"function_call_output","call_id":"a","output":"1"}]})");
+    CHECK_EQ(same.chat["messages"].size(), (size_t)3);
+    CHECK_EQ(same.chat["messages"][2].value("tool_call_id", ""), std::string("a"));
+}
+
+/* Codex's own compaction, with a provider that is not OpenAI (codex 0.167, recorded against a fake
+ * server): no compaction item and no /responses/compact call, only an ordinary request
+ * with the conversation, `tools: []` and the compaction prompt last; then the next turn carries the
+ * summary as a user message. Both are served, streamed as Codex asks. (The shape below is the
+ * recorded one, its texts shortened.) */
+TEST(codexs_local_compaction_turn_is_served) {
+    const std::string meta = R"("client_metadata":{"turn_id":"t1","x-codex-turn-metadata":"{\"request_kind\":\"compaction\"}"},)";
+    const std::string compaction = R"({"model":"m","stream":true,"tools":[],"tool_choice":"auto","parallel_tool_calls":false,
+        "reasoning":{"effort":"medium"},"store":false,"include":["reasoning.encrypted_content"],
+        "prompt_cache_key":"k","text":{"verbosity":"low"},)" + meta + R"("max_output_tokens":200,"input":[
+        {"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>"}]},
+        {"type":"message","role":"developer","content":[{"type":"input_text","text":"<collaboration_mode>"}]},
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>"}]},
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"Run true, then say ok."}]},
+        {"type":"function_call","status":"completed","id":"fc_0","name":"exec_command","arguments":"{\"cmd\": \"true\"}","call_id":"call_0"},
+        {"type":"function_call_output","id":"fco_1","call_id":"call_0","output":"Process exited with code 0"},
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task."}]}]})";
+    const Conv c = convert(compaction);
+    CHECK_OK(c.rc);
+    CHECK(!c.chat.contains("tools"));
+    CHECK_EQ(c.chat["tool_choice"], json("auto"));
+    Fixture f;
+    f.sched.reply = "Summary: true ran; say ok.";
+    HttpResponse s = f.post("/v1/responses", compaction);
+    CHECK_EQ(s.status, 200);
+    const auto ev = events(drain(s));
+    REQUIRE(!ev.empty());
+    CHECK_EQ(ev.back().type, std::string("response.completed"));
+    CHECK_EQ(ev.back().data["response"]["output"].back().value("type", ""), std::string("message"));
+    f.sched.join_all();
+    /* the turn after it: the summary as a user message, the tools again */
+    const std::string next = std::string(R"({"model":"m","stream":true,"tool_choice":"auto","max_output_tokens":200,"tools":[)") + kPatchTool +
+        R"(],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Run true, then say ok."}]},
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"Another language model started to solve this problem and produced a summary of its thinking process. Summary: true ran."}]}]})";
+    HttpResponse n = f.post("/v1/responses", next);
+    CHECK_EQ(n.status, 200);
+    const auto nev = events(drain(n));
+    REQUIRE(!nev.empty());
+    CHECK_EQ(nev.back().type, std::string("response.completed"));
+    f.sched.join_all();
 }
 
 TEST(previous_response_id_is_still_refused) {
@@ -820,17 +935,48 @@ TEST(other_tool_types_are_still_left_out) {
     CHECK(none.custom.empty());
 }
 
-/* A forced FUNCTION the request does not offer is the chat path's to judge, as in 1.17.0; the custom
- * form is "auto" (as Strata), so naming no offered tool is no error there. */
+/* A tool_choice the request cannot honour acts as "auto", as in Strata (frontend.py forced_call),
+ * not a 400; "required" with one tool forces it; a choice it can honour passes on. */
 TEST(tool_choice_naming_no_offered_tool) {
-    const std::string tools = R"("tools":[{"type":"custom","name":"apply_patch"}],)";
-    const Conv c = convert("{" + tools + R"("input":"x","tool_choice":{"type":"custom","name":"nope"}})");
-    CHECK_OK(c.rc);
-    CHECK_EQ(c.chat["tool_choice"], json("auto"));
+    const std::string tools = R"("tools":[{"type":"custom","name":"apply_patch"},
+        {"type":"function","name":"f","parameters":{"type":"object"}}],)";
+    struct Case { const char* choice; json chat; };
+    const json named_f = json::parse(R"({"type":"function","function":{"name":"f"}})");
+    for (const Case& k : { Case{ R"({"type":"custom","name":"nope"})", json("auto") },
+                           Case{ R"({"type":"function","name":"nope"})", json("auto") },
+                           Case{ R"({"type":"function","function":{"name":"nope"}})", json("auto") },
+                           Case{ R"({"type":"function","name":7})", json("auto") },
+                           Case{ R"({"type":"allowed_tools","mode":"auto","tools":[]})", json("auto") },
+                           Case{ R"("sometimes")", json("auto") },
+                           Case{ "5", json("auto") },
+                           Case{ R"({"type":"function","name":"f"})", named_f },
+                           Case{ R"({"type":"function","function":{"name":"f"}})", named_f },
+                           Case{ R"({"type":"tool","name":"f"})", named_f },
+                           Case{ R"("required")", json("required") },
+                           Case{ R"({"type":"any"})", json("required") },
+                           Case{ R"({"type":"auto"})", json("auto") },
+                           Case{ R"("none")", json("none") } }) {
+        const Conv c = convert("{" + tools + R"("input":"x","tool_choice":)" + k.choice + "}");
+        CHECK_OK(c.rc);
+        if (c.chat["tool_choice"] != k.chat) fprintf(stderr, "    %s -> %s\n", k.choice, c.chat["tool_choice"].dump().c_str());
+        CHECK_EQ(c.chat["tool_choice"], k.chat);
+    }
+    /* "required" with one tool names it; with none, it is "auto" */
+    const Conv one = convert(R"({"input":"x","tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":"required"})");
+    CHECK_EQ(one.chat["tool_choice"], json::parse(R"({"type":"function","function":{"name":"apply_patch"}})"));
+    const Conv none = convert(R"({"input":"x","tools":[{"type":"web_search"}],"tool_choice":"required"})");
+    CHECK_EQ(none.chat["tool_choice"], json("auto"));
+    /* a namespace joins the name, as the tools are named */
+    const Conv ns = convert(R"({"input":"x","tools":[{"type":"namespace","name":"crm","tools":[{"type":"function","name":"find"}]}],
+        "tool_choice":{"type":"function","namespace":"crm","name":"find"}})");
+    CHECK_EQ(ns.chat["tool_choice"], json::parse(R"({"type":"function","function":{"name":"crm__find"}})"));
+    /* served end to end, where a 400 was */
     Fixture f;
-    HttpResponse r = f.post("/v1/responses", "{" + tools + R"("input":"x","tool_choice":{"type":"custom","name":"nope"}})");
-    CHECK_EQ(r.status, 200);
-    f.sched.join_all();
+    for (const char* choice : { R"({"type":"function","name":"nope"})", R"({"type":"function","name":7})" }) {
+        HttpResponse r = f.post("/v1/responses", "{" + tools + R"("input":"x","tool_choice":)" + choice + "}");
+        CHECK_EQ(r.status, 200);
+        f.sched.join_all();
+    }
 }
 
 /* As Strata: an item with no usable name is refused; an input that is not a string reads as "", a
@@ -891,9 +1037,9 @@ TEST(function_and_chat_tool_replies_are_as_in_1_17_0) {
     CHECK(has(g.at("responses_fn"), R"("call_id":"call_ID")"));
     CHECK(has(g.at("responses_ns_stream"), R"("call_id":"call_ID")"));
     auto same = [&](const char* name, const std::string& got) {
-        const std::string n = normalize(got);
-        if (n != g.at(name)) fprintf(stderr, "    %s differs from 1.17.0\n", name);
-        CHECK_EQ(n, g.at(name));
+        const std::string n = join_argument_chunks(normalize(got)), want = join_argument_chunks(g.at(name));
+        if (n != want) fprintf(stderr, "    %s differs from 1.17.0\n%s\n", name, getenv("CT_FULL") ? n.c_str() : "");
+        CHECK_EQ(n, want);
     };
     const std::string fn = R"("tools":[{"type":"function","name":"get","description":"Weather.","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}],)";
     const std::string ns = R"("tools":[{"type":"namespace","name":"crm","description":"d","tools":[{"type":"function","name":"find","parameters":{"type":"object"}}]}],)";
@@ -1083,23 +1229,69 @@ TEST(the_same_requests_answer_as_strata_does) {
         const json& st = c["strata_tools"];
         if (st.contains("tools") && rc.rc == RAD_OK) {
             json sn = json::array(), rn = json::array(), sc = json::array(), rcust = json::array();
-            if (st["tools"].is_array())
-                for (const json& t : st["tools"]) {
-                    sn.push_back(t["name"]);
-                    if (st["names"].contains(t["name"].get<std::string>()) &&
-                        st["names"][t["name"].get<std::string>()][2] == "custom")
-                        sc.push_back(json{ { "name", t["name"] }, { "description", t["description"] }, { "parameters", t["parameters"] } });
+            json sf = json::array(), rf = json::array();
+            /* the namespaces the request (and its additional_tools items) declares: their descriptions,
+             * and their untyped members */
+            std::map<std::string, std::string> ns_desc;
+            std::set<std::string> untyped;
+            json declared = c["request"].value("tools", json::array());
+            if (c["request"]["input"].is_array())
+                for (const json& it : c["request"]["input"])
+                    if (it.is_object() && it.value("type", "") == "additional_tools" && it.contains("tools") && it["tools"].is_array())
+                        for (const json& t : it["tools"]) declared.push_back(t);
+            for (const json& t : declared)
+                if (t.is_object() && t.value("type", "") == "namespace") {
+                    ns_desc[t.value("name", "")] = t.value("description", "");
+                    for (const json& m : t.value("tools", json::array()))
+                        if (!m.contains("type")) untyped.insert(t.value("name", "") + "." + m.value("name", ""));
                 }
+            if (st["tools"].is_array()) {
+                /* DUP-ADDITIONAL: Strata offers every definition of a name an additional_tools item repeats
+                 * (its name map keeps the last); Radiance offers the last one only, where Strata's last is. */
+                std::map<std::string, size_t> last;
+                for (size_t k = 0; k < st["tools"].size(); ++k) last[st["tools"][k]["name"].get<std::string>()] = k;
+                for (size_t k = 0; k < st["tools"].size(); ++k) {
+                    const json& t = st["tools"][k];
+                    const std::string n = t["name"].get<std::string>();
+                    if (last[n] != k) continue;
+                    if (untyped.count(n)) continue;   /* UNTYPED-MEMBER: Strata offers an untyped member as a function; Radiance leaves it out */
+                    sn.push_back(t["name"]);
+                    const json& kind = st["names"].contains(n) ? st["names"][n][2] : json();
+                    if (kind == "custom")
+                        sc.push_back(json{ { "name", t["name"] }, { "description", t["description"] }, { "parameters", t["parameters"] } });
+                    if (kind == "function") {
+                        /* NS-DESC: Strata leads a namespace's function member's description with the namespace's;
+                         * Radiance keeps the member's own (1.17.0, function tools unchanged) */
+                        std::string d = t["description"].get<std::string>();
+                        const json& space = st["names"][n][0];
+                        if (space.is_string() && !ns_desc[space.get<std::string>()].empty()) {
+                            const std::string lead = ns_desc[space.get<std::string>()];
+                            if (d == lead) d = "";
+                            else if (d.rfind(lead + "\n\n", 0) == 0) d = d.substr(lead.size() + 2);
+                        }
+                        sf.push_back(json{ { "name", t["name"] }, { "description", d }, { "parameters", t["parameters"] } });
+                    }
+                }
+            }
             /* Deviation TOOLS-NONE is checked separately below: Strata offers no tools for "none". */
             const bool none = c["request"].value("tool_choice", json()) == "none";
             if (rc.chat.contains("tools") && !none)
                 for (const json& t : rc.chat["tools"]) {
                     const std::string n = t["function"]["name"].get<std::string>();
                     rn.push_back(ns_fn_as_strata(n, rc.ns));
-                    if (rc.custom.count(n))
+                    if (rc.custom.count(n)) {
                         rcust.push_back(json{ { "name", n }, { "description", t["function"].value("description", "") },
                                               { "parameters", t["function"]["parameters"] } });
+                    } else {
+                        /* FN-DEFAULTS: Strata gives a function without them the description "" and the parameters
+                         * {"type":"object","properties":{}}; Radiance omits the one and sends {} (1.17.0) */
+                        json params = t["function"]["parameters"];
+                        if (params == json::object()) params = json::parse(R"({"type":"object","properties":{}})");
+                        rf.push_back(json{ { "name", ns_fn_as_strata(n, rc.ns) }, { "description", t["function"].value("description", "") },
+                                           { "parameters", params } });
+                    }
                 }
+            if (!none) differ("function tools", sf, rf);
             if (!none) differ("tool names", sn, rn);
             differ("custom tools", sc, rcust);
             std::map<std::string, json> sm, rm;   /* compared as maps: the order is not the point */

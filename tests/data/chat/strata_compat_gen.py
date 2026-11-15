@@ -100,6 +100,54 @@ CASES.append({"name": "history_custom_pairs", "row": "D1 D2 D3", "reply": None, 
     {"type": "custom_tool_call_output", "call_id": "c4", "output": "x"},
     {"role": "user", "content": "and now?"}], "tools": [*TOOLS, PATCH, NS_CUSTOM]}})
 
+# More cases: result order, tool_choice, function offers, relaxed
+# custom_tool_call fields, additional_tools duplicates, Codex's local compaction request (codex 0.167, a custom provider)
+CASES.append({"name": "results_out_of_call_order", "row": "D2 (result order)", "reply": None, "request": {"input": [
+    {"role": "user", "content": "go"},
+    {"type": "function_call", "call_id": "c1", "name": "exec_command", "arguments": "{\"cmd\": \"ls\"}"},
+    {"type": "custom_tool_call", "call_id": "c2", "name": "apply_patch", "input": "p"},
+    {"type": "function_call", "call_id": "c3", "name": "exec_command", "arguments": "{\"cmd\": \"pwd\"}"},
+    {"type": "custom_tool_call_output", "call_id": "c2", "output": "patched"},
+    {"type": "function_call_output", "call_id": "stray", "output": "?"},
+    {"type": "function_call_output", "call_id": "c3", "output": "/w"},
+    {"type": "function_call_output", "call_id": "c1", "output": "a b"},
+    {"role": "user", "content": "next"}], "tools": [*TOOLS, PATCH]}})
+for key, choice in {"function_not_offered": {"type": "function", "name": "nope"},
+                    "function_name_not_a_string": {"type": "function", "name": 7},
+                    "unknown_shape": {"type": "allowed_tools", "mode": "auto", "tools": []}}.items():
+    CASES.append({"name": f"tool_choice_{key}", "row": "E3 (tool_choice)", "reply": "</think>\n\nNo call.",
+                  "request": {"model": "m", "input": "go", "max_output_tokens": 40000, "tools": [*TOOLS, PATCH],
+                              "tool_choice": choice}})
+CASES.append({"name": "function_offers_in_a_namespace", "row": "A5 (function offers)", "reply": None, "request": {
+    "input": "x", "tools": [{"type": "function", "name": "bare"},
+                            {"type": "namespace", "name": "crm", "description": "CRM.", "tools": [
+                                {"type": "function", "name": "find", "description": "Find.",
+                                 "parameters": {"type": "object"}},
+                                {"type": "function", "name": "quiet"},
+                                {"name": "untyped", "parameters": {"type": "object"}},
+                                {"type": "custom", "name": "raw"}]}]}})
+CASES.append({"name": "history_custom_fields_not_strings", "row": "E4", "reply": None, "request": {"input": [
+    {"role": "user", "content": "go"},
+    {"type": "custom_tool_call", "call_id": 9, "name": "apply_patch", "input": "p"},
+    {"type": "custom_tool_call", "call_id": "c2", "namespace": 5, "name": "raw", "input": "q"},
+    {"type": "custom_tool_call", "call_id": "c3", "namespace": [], "name": "apply_patch", "input": "r"},
+    {"type": "custom_tool_call_output", "call_id": "c2", "output": "2"}], "tools": [PATCH]}})
+CASES.append({"name": "additional_tools_named_again", "row": "A (additional_tools)", "reply": None, "request": {"input": [
+    {"role": "user", "content": "go"},
+    {"type": "additional_tools", "tools": [{**TOOLS[0], "description": "Again."}, PATCH]},
+    {"type": "additional_tools", "tools": [{"type": "function", "name": "apply_patch", "parameters": {"type": "object"}}]}],
+    "tools": [*TOOLS]}})
+CASES.append({"name": "codex_local_compaction", "row": "COMPACTION", "reply": "</think>\n\nSummary: ls ran.", "request": {
+    "model": "m", "instructions": "You are Codex.", "max_output_tokens": 40000, "tools": [], "tool_choice": "auto",
+    "parallel_tool_calls": False, "reasoning": {"effort": "medium"}, "store": False,
+    "include": ["reasoning.encrypted_content"], "text": {"verbosity": "low"}, "input": [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run ls."}]},
+        {"type": "function_call", "call_id": "call_0", "name": "exec_command", "arguments": "{\"cmd\": \"ls\"}"},
+        {"type": "function_call_output", "call_id": "call_0", "output": "a b"},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text":
+            "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will "
+            "resume the task."}]}]}})
+
 
 def strata_script(text):
     import re
