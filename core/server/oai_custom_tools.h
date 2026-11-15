@@ -66,25 +66,35 @@ inline int as_function(const json& t, json* fn, ApiError* err, const char* param
     return RAD_OK;
 }
 
+/* Python's truth of a JSON value, which Strata tests a field's presence by. */
+inline bool py_truthy(const json& v) {
+    if (v.is_null()) return false;
+    if (v.is_boolean()) return v.get<bool>();
+    if (v.is_number()) return v != json(0);
+    if (v.is_string() || v.is_array() || v.is_object()) return !v.empty();
+    return true;
+}
+
 /* The chat tool call a custom_tool_call input item stands for: its raw input as the arguments
- * {"input": ...}, under the name its tool was offered as (flat_name). As in Strata, a name is
- * required and an input that is not a string reads as "". */
+ * {"input": ...}, under the name its tool was offered as (flat_name). As in Strata: a name is
+ * required; an input that is not a string reads as ""; the call_id is passed through as sent; and
+ * a namespace joins the name when it is set at all ("crm" -> crm.<name>, 5 -> 5.<name>; Strata
+ * writes a list or object with Python's str, this its JSON). */
 inline int input_call(const json& item, json* call, ApiError* err) {
-    std::string id, name, space;
-    auto str = [&](const char* k, const char* param, std::string* out) {
-        auto it = item.find(k);
-        if (it == item.end() || it->is_null()) return true;
-        if (!it->is_string()) { *err = err_bad(param, "expected a string"); return false; }
-        *out = it->get<std::string>();
-        return true;
-    };
-    if (!str("call_id", "input[].call_id", &id) || !str("name", "input[].name", &name) ||
-        !str("namespace", "input[].namespace", &space))
-        return RAD_E_INVAL;
-    if (name.empty()) {
+    auto n = item.find("name");
+    if (n == item.end() || !n->is_string() || n->get<std::string>().empty()) {
         *err = err_bad("input[].name", "a custom_tool_call needs a name");
         return RAD_E_INVAL;
     }
+    std::string name = n->get<std::string>(), space;
+    auto ns = item.find("namespace");
+    if (ns != item.end() && py_truthy(*ns)) {
+        if (ns->is_string()) space = ns->get<std::string>();
+        else if (ns->is_boolean()) space = "True";
+        else space = ns->dump();
+    }
+    auto c = item.find("call_id");
+    const json id = c != item.end() && !c->is_null() ? *c : json("");
     auto in = item.find("input");
     const std::string input = in != item.end() && in->is_string() ? in->get<std::string>() : "";
     name = flat_name(space, name);

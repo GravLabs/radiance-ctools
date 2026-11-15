@@ -833,15 +833,14 @@ TEST(tool_choice_naming_no_offered_tool) {
     f.sched.join_all();
 }
 
-/* As Strata: an item with no usable name is refused, and an input that is not a string reads as
- * "". Radiance's own type checks on call_id and namespace stay (deviation STRICT-TYPES). */
+/* As Strata: an item with no usable name is refused; an input that is not a string reads as "", a
+ * call_id is passed through as sent, and a namespace joins the name when it is set at all. (An
+ * output item's call_id is checked as a function_call_output's is: the same, 1.17.0, path.) */
 TEST(a_malformed_custom_tool_call_item_is_refused) {
     struct Case { const char* item; const char* param; };
     for (const Case& k : { Case{ R"({"type":"custom_tool_call","call_id":"c","input":"x"})", "input[].name" },
                            Case{ R"({"type":"custom_tool_call","call_id":"c","name":"","input":"x"})", "input[].name" },
                            Case{ R"({"type":"custom_tool_call","call_id":"c","name":5,"input":"x"})", "input[].name" },
-                           Case{ R"({"type":"custom_tool_call","call_id":9,"name":"apply_patch","input":"x"})", "input[].call_id" },
-                           Case{ R"({"type":"custom_tool_call","call_id":"c","name":"p","namespace":[],"input":"x"})", "input[].namespace" },
                            Case{ R"({"type":"custom_tool_call_output","call_id":5,"output":"x"})", "input[].call_id" } }) {
         const Conv c = convert(std::string(R"({"input":[)") + k.item + "]}");
         CHECK(c.rc < 0);
@@ -854,6 +853,29 @@ TEST(a_malformed_custom_tool_call_item_is_refused) {
         CHECK_OK(c.rc);
         CHECK_EQ(c.chat["messages"][0]["tool_calls"][0]["function"].value("arguments", ""), std::string(R"({"input":""})"));
     }
+    struct Pass { const char* fields; json id; const char* name; };
+    for (const Pass& k : { Pass{ R"("call_id":9,"name":"p")", json(9), "p" },
+                           Pass{ R"("call_id":null,"name":"p")", json(""), "p" },
+                           Pass{ R"("name":"p","namespace":[])", json(""), "p" },
+                           Pass{ R"("name":"p","namespace":"")", json(""), "p" },
+                           Pass{ R"("name":"p","namespace":0)", json(""), "p" },
+                           Pass{ R"("name":"p","namespace":5)", json(""), "5.p" },
+                           Pass{ R"("name":"p","namespace":true)", json(""), "True.p" } }) {
+        const Conv c = convert(std::string(R"({"input":[{"type":"custom_tool_call",)") + k.fields + R"(,"input":"x"}]})");
+        CHECK_OK(c.rc);
+        if (c.rc != RAD_OK) { fprintf(stderr, "    %s refused\n", k.fields); continue; }
+        const json& call = c.chat["messages"][0]["tool_calls"][0];
+        CHECK_EQ(call["id"], k.id);
+        CHECK_EQ(call["function"].value("name", ""), std::string(k.name));
+    }
+    /* and the server serves a history whose call_id is not a string */
+    Fixture f;
+    HttpResponse r = f.post("/v1/responses", R"({"tools":[{"type":"custom","name":"apply_patch"}],"input":[
+        {"role":"user","content":"edit"},
+        {"type":"custom_tool_call","call_id":9,"name":"apply_patch","input":"x"},
+        {"type":"custom_tool_call_output","call_id":"9","output":"ok"}]})");
+    CHECK_EQ(r.status, 200);
+    f.sched.join_all();
 }
 
 /* ================================================================== F. regression */
