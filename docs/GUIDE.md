@@ -2774,7 +2774,8 @@ limits apply; §5.11 lists what it reads, takes and refuses. `POST /v1/messages/
 returns the prompt's length. The key may come as `X-Api-Key` (§6.6).
 
 `POST /v1/responses` is OpenAI's Responses API, translated the same way: `instructions` and `input`
-(a string, or message, `function_call`, `function_call_output` and `reasoning` items) become the
+(a string, or message, `function_call`, `function_call_output`, `custom_tool_call`,
+`custom_tool_call_output` and `reasoning` items) become the
 conversation; `max_output_tokens`, `reasoning.effort` and `text.format` become the chat request's
 fields; and every field the Responses API does not define passes through to the chat request, as in
 llama-server (`chat_template_kwargs`, `top_k`, ...). The answer is a response object, or its event
@@ -2785,8 +2786,13 @@ response object, not output. A reply cut at
 function tools a `namespace` groups (Codex sends every MCP server's tools that way), named
 `<namespace>__<name>`: the reply's `function_call` item carries `namespace` and `name` apart, and a
 `function_call` input item or a `tool_choice` naming a namespace is joined back the same way. Two
-tools that would share a name are refused. Built-in tools (web search, file search, computer use)
-and freeform custom tools are left out, as in llama-server.
+tools that would share a name are refused. Freeform custom tools (`"type": "custom"`, Codex's
+`apply_patch`) are offered as a function tool taking one string `input`, with a grammar `format`
+shown to the model as text in its description; the reply's call to one is a `custom_tool_call` item
+(`ctc_...` id, `call_id`, `name`, the raw `input`), streamed as
+`response.custom_tool_call_input.delta` and `.done` with the input sent whole at the call's end, and
+a `custom_tool_call` input item becomes the call it was. Built-in tools (web search, file search, computer use) are left out, as in
+llama-server.
 Responses are not stored, so `previous_response_id` is refused: send the conversation as `input`.
 What a response object cannot carry is refused: `n` other than 1, and logprobs (`include` naming
 `message.output_text.logprobs`, `top_logprobs`, `logprobs`, `n_probs`), which
