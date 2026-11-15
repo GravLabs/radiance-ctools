@@ -1,6 +1,7 @@
 #include "oai.h"
 #include "oai_additional_tools.h"
 #include "oai_custom_tools.h"
+#include "oai_tool_choice.h"
 #include "oai_tool_results.h"
 #include "http.h"
 #include "json_partial.h"
@@ -4547,19 +4548,8 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
         if (own_tools < given.size()) echo_tools.erase(echo_tools.begin() + (std::ptrdiff_t)own_echo, echo_tools.end());
     }
     auto tc = b.find("tool_choice");
-    if (tc != b.end() && !tc->is_null()) {
-        std::string type = "auto", name, space;
-        if (tc->is_object() && (!member_str(*tc, "type", "tool_choice.type", &type, err) ||
-                                !member_str(*tc, "name", "tool_choice.name", &name, err) ||
-                                !member_str(*tc, "namespace", "tool_choice.namespace", &space, err)))
-            return RAD_E_INVAL;
-        if (!space.empty()) name = space + "__" + name;
-        if (!tc->is_object()) o["tool_choice"] = *tc;
-        else if (type == "function")
-            o["tool_choice"] = json{ { "type", "function" }, { "function", { { "name", name } } } };
-        else if (type == "custom") o["tool_choice"] = "auto";   /* as Strata: oai_custom_tools.h */
-        else o["tool_choice"] = type;
-    }
+    if (tc != b.end() && !tc->is_null())   /* one it cannot honour acts as "auto": oai_tool_choice.h */
+        o["tool_choice"] = tool_choice::served(*tc, o.contains("tools") ? o.at("tools") : json());
     if (b.contains("max_output_tokens")) o["max_tokens"] = b.at("max_output_tokens");
     auto re = b.find("reasoning");
     if (re != b.end() && re->is_object() && re->contains("effort") && re->at("effort").is_string())

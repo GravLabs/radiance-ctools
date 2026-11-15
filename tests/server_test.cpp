@@ -4648,10 +4648,10 @@ TEST(a_field_of_the_wrong_type_is_a_400_on_every_api) {
              Case{ "/v1/responses", R"({"input":[{"type":5}]})", "input[].type" },
              Case{ "/v1/responses", R"({"input":[{"role":"user","content":[{"type":"input_text",
                    "text":5}]}]})", "input[].content[].text" },
+             /* (A Responses tool_choice it cannot honour, {"type":"function","name":7} among them,
+              * acts as "auto", as in Strata: custom_tools_test, tool_choice_naming_no_offered_tool.) */
              Case{ "/v1/responses", R"({"input":[{"type":"function_call","name":"f","arguments":{}}]})",
-                   "input[].arguments" },
-             Case{ "/v1/responses", R"({"input":"hi","tool_choice":{"type":"function","name":7}})",
-                   "tool_choice.name" } }) {
+                   "input[].arguments" } }) {
         HttpResponse r = f.post(c.path, c.body);
         CHECK_EQ(r.status, 400);
         const json e = json::parse(r.body, nullptr, false);
