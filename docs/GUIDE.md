@@ -2791,8 +2791,26 @@ tools that would share a name are refused. Freeform custom tools (`"type": "cust
 shown to the model as text in its description; the reply's call to one is a `custom_tool_call` item
 (`ctc_...` id, `call_id`, `name`, the raw `input`), streamed as
 `response.custom_tool_call_input.delta` and `.done` with the input sent whole at the call's end, and
-a `custom_tool_call` input item becomes the call it was. Built-in tools (web search, file search, computer use) are left out, as in
+a `custom_tool_call` input item becomes the call it was (an `input` that is not a string reads as
+`""`). A custom tool inside a `namespace` is offered as Strata offers it, named
+`<namespace>.<name>` with the namespace's description leading its own, and its `custom_tool_call`
+item carries `namespace` and `name` apart. A `tool_choice` of the `custom` form is `auto`, as in
+Strata: the model may call the tool, and is not made to. Codex's `additional_tools` input items add
+their tools after the request's own and nothing to the conversation; the response echoes the
+request's own `tools`. Built-in tools (web search, file search, computer use) are left out, as in
 llama-server.
+
+Custom tools follow Strata's `serve/responses.py`, which they were ported from (MIT), and
+`tests/custom_tools_test.cpp` checks them against Strata's own answers. The differences are where
+Radiance keeps its existing behaviour for every tool: a namespace's function tools are named
+`<namespace>__<name>` (Strata: `<namespace>.<name>`); `tool_choice` `"none"` sends the tools with
+`"none"` (Strata sends none); a reply that ends inside a call is, not streamed, the model's text
+(Strata: an `incomplete` call item; the streams agree); `function_call_arguments.done` does not
+repeat the function's name, and reasoning text is streamed inside `content_part` events; two tools
+of one name, a non-string `call_id` or `namespace`, a tool without a type and a namespace member
+of another kind are refused or left out as for function tools (Strata lets the last tool of a name
+win, passes the fields through, and refuses the last two); errors name their parameter as
+`tools[].name`, not `tools[0].name`. Strata's Codex compaction is not served.
 Responses are not stored, so `previous_response_id` is refused: send the conversation as `input`.
 What a response object cannot carry is refused: `n` other than 1, and logprobs (`include` naming
 `message.output_text.logprobs`, `top_logprobs`, `logprobs`, `n_probs`), which
