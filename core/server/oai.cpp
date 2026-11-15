@@ -1,6 +1,7 @@
 #include "oai.h"
 #include "oai_additional_tools.h"
 #include "oai_custom_tools.h"
+#include "oai_tool_results.h"
 #include "http.h"
 #include "json_partial.h"
 #include "rad_internal.h"
@@ -4449,6 +4450,7 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
         *err = err_bad("input", "expected a string or an array of items");
         return RAD_E_INVAL;
     }
+    tool_results::order(&msgs);   /* each turn's results in its calls' order: oai_tool_results.h */
     o["messages"] = std::move(msgs);
 
     /* Function tools, and the function tools a namespace groups (Codex sends every MCP server's
