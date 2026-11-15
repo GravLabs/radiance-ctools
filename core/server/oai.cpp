@@ -1,4 +1,5 @@
 #include "oai.h"
+#include "oai_additional_tools.h"
 #include "oai_custom_tools.h"
 #include "http.h"
 #include "json_partial.h"
@@ -4436,6 +4437,8 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
                 }
                 msgs.push_back(json{ { "role", "assistant" }, { "content", "" },
                                      { "reasoning_content", text } });
+            } else if (type == "additional_tools") {
+                continue;   /* its tools join the request's below (oai_additional_tools.h) */
             } else {
                 *err = err_unsupported("input[].type",
                                        "an input item of type \"" + type + "\" is not served");
@@ -4455,8 +4458,9 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
      * names collected for the reply (oai_custom_tools.h). Built-in tools (web search, file
      * search, computer use) have no chat-completions counterpart and are left out. */
     json echo_tools = json::array();
-    auto tit = b.find("tools");
-    if (tit != b.end() && tit->is_array()) {
+    size_t own_tools = 0, own_echo = 0;   /* additional_tools items' tools follow: oai_additional_tools.h */
+    const json given = additional_tools::offered(b, &own_tools);
+    if (given.is_array()) {
         json tools = json::array();
         std::set<std::string> names;
         auto add = [&](const json& t, const std::string& space) -> int {
@@ -4477,7 +4481,9 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
             if (!space.empty() && ns) (*ns)[flat] = { space, name };
             return RAD_OK;
         };
-        for (const json& t : *tit) {
+        for (size_t ti = 0; ti < given.size(); ++ti) {
+            const json& t = given[ti];
+            if (ti == own_tools) own_echo = echo_tools.size();
             const std::string type = str_or(t, "type");
             if (type == "namespace") {
                 std::string space;
@@ -4530,6 +4536,7 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
             echo_tools.push_back(t);
         }
         if (!tools.empty()) o["tools"] = std::move(tools);
+        if (own_tools < given.size()) echo_tools.erase(echo_tools.begin() + (std::ptrdiff_t)own_echo, echo_tools.end());
     }
     auto tc = b.find("tool_choice");
     if (tc != b.end() && !tc->is_null()) {
