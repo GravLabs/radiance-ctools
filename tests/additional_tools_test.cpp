@@ -80,13 +80,45 @@ TEST(an_additional_tool_is_served_as_a_request_tool_is) {
     CHECK_EQ(none.echo["tools"].size(), (size_t)1);
 }
 
-/* Two tools of one name are refused, an additional one as a request's own (Radiance's rule for all
- * tools; Strata lets the last win: deviation DUP-NAMES). */
-TEST(an_additional_tool_named_as_a_request_tool_is_refused) {
+/* A tool an additional_tools item names again replaces the earlier one, as in Strata (its later
+ * definition wins): Codex re-sending a tool must not fail the turn. Two tools of one name in the
+ * request's own tools are still refused (Radiance's rule, deviation DUP-NAMES). */
+TEST(an_additional_tool_named_again_replaces_the_earlier_one) {
     const Conv c = convert(std::string(R"({"input":[{"role":"user","content":"x"},
-        {"type":"additional_tools","tools":[{"type":"function","name":"exec_command"}]}],)") + kTools + "}");
-    CHECK(c.rc < 0);
-    CHECK_EQ(c.err.status, 400);
+        {"type":"additional_tools","tools":[{"type":"function","name":"exec_command","description":"Again."},
+                                            {"type":"custom","name":"later"}]},
+        {"type":"additional_tools","tools":[{"type":"function","name":"later","parameters":{"type":"object"}}]}],)") + kTools + "}");
+    CHECK_OK(c.rc);
+    CHECK_EQ(json(tool_names(c.chat)).dump(), std::string(R"(["exec_command","later"])"));
+    const json& tools = c.chat["tools"];
+    REQUIRE(tools.size() == 2);
+    CHECK_EQ(tools[0]["function"].value("description", ""), std::string("Again."));
+    CHECK(c.custom.empty());   /* "later" was a custom tool, then a function tool: the function wins */
+    REQUIRE(c.echo["tools"].size() == 1);
+    CHECK_EQ(c.echo["tools"][0].value("description", ""), std::string("Runs a command."));
+    /* a custom tool replacing a function tool is served as custom, and its call comes back so */
+    const std::string body = std::string(R"({"max_output_tokens":200,"input":[{"role":"user","content":"x"},
+        {"type":"additional_tools","tools":[{"type":"custom","name":"exec_command"}]}],)") + kTools + "}";
+    const Conv k = convert(body);
+    CHECK_OK(k.rc);
+    CHECK(k.custom.count("exec_command") == 1);
+    Fixture f;
+    f.sched.reply = R"(TOOL:exec_command:{"input":"ls"})";
+    const json o = json::parse(f.post("/v1/responses", body).body);
+    CHECK_EQ(o["output"][0].value("type", ""), std::string("custom_tool_call"));
+    f.sched.join_all();
+    /* a namespace's tool named again */
+    const Conv n = convert(R"({"input":[{"role":"user","content":"x"},
+        {"type":"additional_tools","tools":[{"type":"namespace","name":"crm","tools":[{"type":"function","name":"find"}]}]}],
+        "tools":[{"type":"namespace","name":"crm","tools":[{"type":"function","name":"find","description":"old"}]}]})");
+    CHECK_OK(n.rc);
+    CHECK_EQ(json(tool_names(n.chat)).dump(), std::string(R"(["crm__find"])"));
+    CHECK(!n.chat["tools"][0]["function"].contains("description"));
+    CHECK_EQ(n.ns.at("crm__find").first, std::string("crm"));
+    /* the request's own tools: refused, as before */
+    const Conv own = convert(R"({"input":"x","tools":[{"type":"function","name":"a"},{"type":"function","name":"a"}]})");
+    CHECK(own.rc < 0);
+    CHECK_EQ(own.err.status, 400);
 }
 
 /* Strata's JsonFormatWithTools request (Codex's review turn): the item, a developer role on it,

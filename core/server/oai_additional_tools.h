@@ -18,6 +18,10 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <map>
+#include <set>
+#include <string>
+#include <utility>
 
 namespace rad {
 namespace server {
@@ -45,6 +49,20 @@ inline json offered(const json& body, size_t* own) {
         for (const json& tool : *more) all.push_back(tool);
     }
     return all;
+}
+
+/* A tool an additional_tools item names again replaces the one offered before it, as in Strata
+ * (its later definition wins): the earlier one leaves the chat tools and the name maps, and the
+ * caller offers the new one. (Two tools of one name in the request's own `tools` stay refused.) */
+inline void drop(const std::string& flat, json* tools,
+                 std::map<std::string, std::pair<std::string, std::string>>* ns, std::set<std::string>* custom) {
+    for (auto it = tools->begin(); it != tools->end(); ++it)
+        if ((*it)["function"].value("name", "") == flat) {
+            tools->erase(it);
+            break;
+        }
+    if (ns) ns->erase(flat);
+    if (custom) custom->erase(flat);
 }
 
 }  /* namespace additional_tools */

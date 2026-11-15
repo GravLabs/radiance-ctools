@@ -4463,6 +4463,7 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
     if (given.is_array()) {
         json tools = json::array();
         std::set<std::string> names;
+        bool additional = false;   /* the tool came in an additional_tools item */
         auto add = [&](const json& t, const std::string& space) -> int {
             std::string name;
             if (!member_str(t, "name", space.empty() ? "tools[].name" : "tools[].tools[].name",
@@ -4470,9 +4471,13 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
                 return RAD_E_INVAL;
             const std::string flat = space.empty() ? name : space + "__" + name;
             if (!names.insert(flat).second) {
-                *err = err_bad("tools", "two tools are named \"" + flat + "\" (a namespace's tools "
-                               "are offered to the model as <namespace>__<name>)");
-                return RAD_E_INVAL;
+                if (additional) {   /* an additional_tools item's tool: the later wins, as in Strata */
+                    additional_tools::drop(flat, &tools, ns, custom);
+                } else {
+                    *err = err_bad("tools", "two tools are named \"" + flat + "\" (a namespace's tools "
+                                   "are offered to the model as <namespace>__<name>)");
+                    return RAD_E_INVAL;
+                }
             }
             json fn = { { "name", flat },
                         { "parameters", t.contains("parameters") ? t.at("parameters") : json::object() } };
@@ -4484,6 +4489,7 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
         for (size_t ti = 0; ti < given.size(); ++ti) {
             const json& t = given[ti];
             if (ti == own_tools) own_echo = echo_tools.size();
+            additional = ti >= own_tools;
             const std::string type = str_or(t, "type");
             if (type == "namespace") {
                 std::string space;
