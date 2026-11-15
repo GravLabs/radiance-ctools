@@ -4492,11 +4492,14 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
                     return RAD_E_INVAL;
                 }
                 for (const json& f : *inner) {
-                    if (str_or(f, "type") == "custom") {
+                    if (str_or(f, "type") == "custom") {   /* named as Strata does: oai_custom_tools.h */
                         json fn;
-                        RAD_TRY(custom_tools::as_function(f, &fn, err, "tools[].tools[].name"));
-                        RAD_TRY(add(fn, space));
-                        if (custom) custom->insert(space + "__" + fn.at("name").get<std::string>());
+                        RAD_TRY(custom_tools::as_function(f, &fn, err, "tools[].tools[].name", space,
+                                                          str_or(t, "description")));
+                        RAD_TRY(add(fn, ""));
+                        const std::string flat = fn.at("name").get<std::string>();
+                        if (ns) (*ns)[flat] = { space, f.at("name").get<std::string>() };
+                        if (custom) custom->insert(flat);
                         continue;
                     }
                     if (str_or(f, "type") != "function") {
@@ -4537,8 +4540,9 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
             return RAD_E_INVAL;
         if (!space.empty()) name = space + "__" + name;
         if (!tc->is_object()) o["tool_choice"] = *tc;
-        else if (type == "function" || type == "custom")   /* custom: oai_custom_tools.h */
+        else if (type == "function")
             o["tool_choice"] = json{ { "type", "function" }, { "function", { { "name", name } } } };
+        else if (type == "custom") o["tool_choice"] = "auto";   /* as Strata: oai_custom_tools.h */
         else o["tool_choice"] = type;
     }
     if (b.contains("max_output_tokens")) o["max_tokens"] = b.at("max_output_tokens");
