@@ -1,5 +1,12 @@
 # radiance
 
+> **radiance-ctools** is a downstream fork of [Radiance](https://codeberg.org/StillDeadcode/radiance):
+> upstream's release plus a patch series that serves OpenAI Responses freeform custom tools (Codex's
+> `apply_patch`) on `/v1/responses`, ported from [Strata](https://github.com/Niko1221/Strata) (MIT).
+> What it changes, and how it follows upstream: [docs/CTOOLS.md](docs/CTOOLS.md). Everything else is upstream's;
+> report upstream issues there.
+
+
 An inference server for AMD GPUs, in C++ and HIP: language models, and image, video, speech and
 music generation. Its HTTP API speaks OpenAI's chat, completions, Responses, images, audio and video
 APIs, Anthropic's Messages API and llama-server's native one, so their clients and SDKs work

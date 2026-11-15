@@ -181,6 +181,13 @@ license text is in the file named beside each.
                   libquant/lq_ggml_*
   nlohmann/json   Copyright (c) 2013-2025 Niels Lohmann             vendor/nlohmann/LICENSE.MIT
   cpp-httplib     Copyright (c) 2017 yhirose                        vendor/cpp-httplib/LICENSE
+  Strata          Copyright (c) 2026 Niko1221 and the Strata        core/server/LICENSE.strata
+                  contributors (github.com/Niko1221/Strata): the Responses custom-tool path
+                  ported from its serve/responses.py and serve/frontend.py --
+                  core/server/oai_custom_tools.h, oai_additional_tools.h, oai_tool_results.h,
+                  oai_tool_choice.h and their hooks -- the cases of tests/custom_tools_test.cpp and
+                  tests/additional_tools_test.cpp ported from its serve/test_responses.py, and
+                  tests/data/chat/strata-compat-custom-tools.json, answers recorded from its server
 
 tests/data/chat/hyv3/chat_template.jinja is Tencent's Hy-Memory-30B-A3B chat template,
 copied unchanged from tencent/Hy-Memory-30B-A3B on Hugging Face.
