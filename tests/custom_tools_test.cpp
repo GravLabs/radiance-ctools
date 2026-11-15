@@ -474,9 +474,10 @@ TEST(a_custom_calls_input_is_kept_byte_for_byte) {
     for (const auto& [what, input] : tricky_inputs()) {
         /* the arguments as JSON (the fake parser hands them over as written) */
         Fixture f;
+        f.sched.pace_every = 256;   /* the ~20 KB reply at a pace its Sink keeps up with */
         f.sched.reply = "TOOL:apply_patch:" + json{ { "input", input } }.dump();
         const json o = json::parse(f.post("/v1/responses", body).body);
-        REQUIRE(o["output"].size() == 1);
+        REQUIRE(o.contains("output") && o["output"].size() == 1);   /* an error body has none: fail, not UB */
         if (o["output"][0].value("input", "?") != input) fprintf(stderr, "    fake parser: %s differs\n", what.c_str());
         CHECK_EQ(o["output"][0].value("input", "?"), input);
         f.sched.join_all();
@@ -484,10 +485,11 @@ TEST(a_custom_calls_input_is_kept_byte_for_byte) {
         /* as the production model writes it (Qwen's format, the real parser): the value between
          * the one newline at each end that is the format's punctuation */
         Fixture q;
+        q.sched.pace_every = 256;
         use_qwen(q, body);
         q.sched.reply = "</think>\n\n" + qwen_call("apply_patch", "input", input);
         const json oq = json::parse(q.post("/v1/responses", body).body);
-        REQUIRE(oq["output"].size() >= 1);
+        REQUIRE(oq.contains("output") && oq["output"].size() >= 1);
         const json& last = oq["output"][oq["output"].size() - 1];
         if (last.value("input", "?") != input) fprintf(stderr, "    qwen parser: %s differs\n", what.c_str());
         CHECK_EQ(last.value("type", ""), std::string("custom_tool_call"));
@@ -631,6 +633,7 @@ TEST(the_streamed_input_is_the_same_bytes_everywhere) {
     for (const auto& [what, input] : tricky_inputs()) {
         for (const bool real : { false, true }) {
             Fixture f;
+            f.sched.pace_every = 256;   /* the ~20 KB reply streamed at a pace its Sink keeps up with */
             if (real) {
                 use_qwen(f, body);
                 f.sched.reply = "</think>\n\n" + qwen_call("apply_patch", "input", input);
@@ -639,7 +642,10 @@ TEST(the_streamed_input_is_the_same_bytes_everywhere) {
             }
             HttpResponse s = f.post("/v1/responses", body);
             std::string deltas, done_input, item_input, completed_input;
-            for (const Ev& e : events(drain(s))) {
+            const auto ev = events(drain(s));
+            REQUIRE(!ev.empty());
+            CHECK_EQ(ev.back().type, std::string("response.completed"));   /* not response.failed */
+            for (const Ev& e : ev) {
                 if (e.type == "response.custom_tool_call_input.delta") deltas += e.data.value("delta", "");
                 if (e.type == "response.custom_tool_call_input.done") done_input = e.data.value("input", "?");
                 if (e.type == "response.output_item.done" && e.data["item"].value("type", "") == "custom_tool_call")
@@ -1335,6 +1341,7 @@ TEST(the_same_requests_answer_as_strata_does) {
         /* the answers */
         if (c.contains("strata_body")) {
             Fixture f;
+            f.sched.pace_every = 256;   /* the long input's stream at a pace its Sink keeps up with */
             use_qwen(f, req);
             f.sched.reply = radiance_script(c["reply"].get<std::string>());
             HttpResponse r = f.post("/v1/responses", req);

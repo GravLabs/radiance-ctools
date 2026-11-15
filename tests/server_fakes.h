@@ -792,6 +792,10 @@ struct FakeScheduler : IScheduler {
     /* Nonzero: every token after the first is a verify step that proposed this many drafts and
      * accepted one, as a speculating engine reports them. */
     int32_t drafts = 0;
+    /* Nonzero: the thread sleeps 1 ms after every this many tokens. One byte a token comes out at
+     * millions a second, and a stream whose consumer falls 8192 tokens behind overflows its Sink
+     * (sink.h), so a test that streams a long reply paces it, as a real engine is paced. */
+    int32_t pace_every = 0;
     /* An embedding request's vector; empty gives none, as an engine that pooled nothing. With
      * `embed_mark_length`, its first component is the input's token count, so inputs can be told
      * apart. */
@@ -860,9 +864,10 @@ struct FakeScheduler : IScheduler {
         const int fst = fail_status;
         const char* fwhy = fail_why;
         const int32_t nd = drafts;
+        const int32_t pe = pace_every;
         std::vector<float> vec = embedding;
         if (embed_mark_length && !vec.empty()) vec[0] = (float)r.prompt.size();
-        workers.emplace_back([sink, cap, text, h, fst, fwhy, nd, np, embed, vec] {
+        workers.emplace_back([sink, cap, text, h, fst, fwhy, nd, pe, np, embed, vec] {
             sink_admitted(sink);
             sink_prompt_stats(sink, 8, 4);
             if (embed) {
@@ -889,6 +894,7 @@ struct FakeScheduler : IScheduler {
                 }
                 if (!sink_push(sink, (int32_t)(unsigned char)c, np >= 0 ? &lp : nullptr)) return;
                 ++n;
+                if (pe > 0 && n % pe == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 if (h && n >= 3) break;
             }
             if (h) {
