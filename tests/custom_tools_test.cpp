@@ -474,7 +474,7 @@ TEST(a_custom_calls_input_is_kept_byte_for_byte) {
     for (const auto& [what, input] : tricky_inputs()) {
         /* the arguments as JSON (the fake parser hands them over as written) */
         Fixture f;
-        f.sched.pace_every = 256;   /* the ~20 KB reply at a pace its Sink keeps up with */
+        f.sched.piece_bytes = 64;   /* the ~20 KB reply as ~330 tokens: far below its Sink's capacity */
         f.sched.reply = "TOOL:apply_patch:" + json{ { "input", input } }.dump();
         const json o = json::parse(f.post("/v1/responses", body).body);
         REQUIRE(o.contains("output") && o["output"].size() == 1);   /* an error body has none: fail, not UB */
@@ -485,7 +485,7 @@ TEST(a_custom_calls_input_is_kept_byte_for_byte) {
         /* as the production model writes it (Qwen's format, the real parser): the value between
          * the one newline at each end that is the format's punctuation */
         Fixture q;
-        q.sched.pace_every = 256;
+        q.sched.piece_bytes = 64;
         use_qwen(q, body);
         q.sched.reply = "</think>\n\n" + qwen_call("apply_patch", "input", input);
         const json oq = json::parse(q.post("/v1/responses", body).body);
@@ -633,7 +633,7 @@ TEST(the_streamed_input_is_the_same_bytes_everywhere) {
     for (const auto& [what, input] : tricky_inputs()) {
         for (const bool real : { false, true }) {
             Fixture f;
-            f.sched.pace_every = 256;   /* the ~20 KB reply streamed at a pace its Sink keeps up with */
+            f.sched.piece_bytes = 64;   /* the ~20 KB reply streamed as ~330 tokens: far below its Sink's capacity */
             if (real) {
                 use_qwen(f, body);
                 f.sched.reply = "</think>\n\n" + qwen_call("apply_patch", "input", input);
@@ -1341,7 +1341,7 @@ TEST(the_same_requests_answer_as_strata_does) {
         /* the answers */
         if (c.contains("strata_body")) {
             Fixture f;
-            f.sched.pace_every = 256;   /* the long input's stream at a pace its Sink keeps up with */
+            f.sched.piece_bytes = 64;   /* the long input as ~330 tokens: far below its Sink's capacity */
             use_qwen(f, req);
             f.sched.reply = radiance_script(c["reply"].get<std::string>());
             HttpResponse r = f.post("/v1/responses", req);

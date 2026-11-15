@@ -50,9 +50,31 @@ using json = nlohmann::ordered_json;
 
 /* One token per byte. Trivially round-trips, so a stop string is a substring test and an expected
  * completion is a literal rather than a vocabulary lookup. */
+/* Multi-byte tokens for FakeScheduler::piece_bytes: id kFakePieceBase + i is the i-th recorded
+ * piece, decoded back to its bytes by FakeDetok and FakeTokenizer. Shared by every fixture of a test
+ * binary, under a lock (requests run on their own threads). */
+constexpr int32_t kFakePieceBase = 1 << 20;
+inline std::mutex& fake_piece_mu() { static std::mutex m; return m; }
+inline std::vector<std::string>& fake_pieces() { static std::vector<std::string> v; return v; }
+inline int32_t fake_piece(std::string bytes) {
+    std::lock_guard<std::mutex> lk(fake_piece_mu());
+    fake_pieces().push_back(std::move(bytes));
+    return kFakePieceBase + (int32_t)(fake_pieces().size() - 1);
+}
+/* The piece `id` names; false for an id no piece was recorded for (it decodes as before, a byte). */
+inline bool fake_piece_bytes(int32_t id, std::string* out) {
+    std::lock_guard<std::mutex> lk(fake_piece_mu());
+    const auto& v = fake_pieces();
+    if (id < kFakePieceBase || (size_t)(id - kFakePieceBase) >= v.size()) return false;
+    *out = v[(size_t)(id - kFakePieceBase)];
+    return true;
+}
+
 struct FakeDetok : IDetokenizer {
     std::string push(int32_t t) override {
         if (t <= 0) return "";
+        std::string piece;
+        if (fake_piece_bytes(t, &piece)) return piece;
         return std::string(1, (char)t);
     }
     std::string flush() override { return ""; }
@@ -92,6 +114,8 @@ struct FakeTokenizer : ITokenizer {
     }
     std::string token_bytes(int32_t id) const override {
         if (special(id)) return fim_name(id);
+        std::string piece;
+        if (fake_piece_bytes(id, &piece)) return piece;
         return std::string(1, (char)id);
     }
     int32_t eos() const override { return 0; }
@@ -792,10 +816,11 @@ struct FakeScheduler : IScheduler {
     /* Nonzero: every token after the first is a verify step that proposed this many drafts and
      * accepted one, as a speculating engine reports them. */
     int32_t drafts = 0;
-    /* Nonzero: the thread sleeps 1 ms after every this many tokens. One byte a token comes out at
-     * millions a second, and a stream whose consumer falls 8192 tokens behind overflows its Sink
-     * (sink.h), so a test that streams a long reply paces it, as a real engine is paced. */
-    int32_t pace_every = 0;
+    /* Nonzero: the reply goes out as tokens of this many bytes each (the last shorter), not one byte
+     * a token. A Sink holds 8192 unread tokens (sink.h) and the thread writes them far faster than
+     * any engine, so a reply longer than that could overflow it whenever the reader is slow; in
+     * pieces it stays far below the Sink's capacity, whatever the reader's pace. */
+    int32_t piece_bytes = 0;
     /* An embedding request's vector; empty gives none, as an engine that pooled nothing. With
      * `embed_mark_length`, its first component is the input's token count, so inputs can be told
      * apart. */
@@ -864,10 +889,10 @@ struct FakeScheduler : IScheduler {
         const int fst = fail_status;
         const char* fwhy = fail_why;
         const int32_t nd = drafts;
-        const int32_t pe = pace_every;
+        const int32_t pb = piece_bytes;
         std::vector<float> vec = embedding;
         if (embed_mark_length && !vec.empty()) vec[0] = (float)r.prompt.size();
-        workers.emplace_back([sink, cap, text, h, fst, fwhy, nd, pe, np, embed, vec] {
+        workers.emplace_back([sink, cap, text, h, fst, fwhy, nd, pb, np, embed, vec] {
             sink_admitted(sink);
             sink_prompt_stats(sink, 8, 4);
             if (embed) {
@@ -877,24 +902,28 @@ struct FakeScheduler : IScheduler {
                 sink_finish(sink, Finish::Length);
                 return;
             }
+            std::vector<int32_t> ids;
+            if (pb > 0)
+                for (size_t at = 0; at < text.size(); at += (size_t)pb) ids.push_back(fake_piece(text.substr(at, (size_t)pb)));
+            else
+                for (char c : text) ids.push_back((int32_t)(unsigned char)c);
             int32_t n = 0;
-            for (char c : text) {
+            for (const int32_t id : ids) {
                 if (n >= cap) break;
                 if (sink_cancelled(sink)) { sink_finish(sink, Finish::Cancelled); return; }
                 if (n > 0 && nd > 0) sink_drafts(sink, nd, 1);
                 /* Logprobs when asked: the n-th token at -(n+1)/4, and alternatives 'x', 'y', ...
                  * at -1, -2, ... */
                 TokenLogprobs lp;
-                lp.token = (int32_t)(unsigned char)c;
+                lp.token = id;
                 lp.logprob = -0.25f * (float)(n + 1);
                 lp.n_top = np > 0 ? np : 0;
                 for (int j = 0; j < lp.n_top; ++j) {
                     lp.top_id[j] = 'x' + j;
                     lp.top_lp[j] = -1.0f - (float)j;
                 }
-                if (!sink_push(sink, (int32_t)(unsigned char)c, np >= 0 ? &lp : nullptr)) return;
+                if (!sink_push(sink, id, np >= 0 ? &lp : nullptr)) return;
                 ++n;
-                if (pe > 0 && n % pe == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 if (h && n >= 3) break;
             }
             if (h) {
