@@ -1,4 +1,5 @@
 #include "oai.h"
+#include "oai_custom_tools.h"
 #include "http.h"
 #include "json_partial.h"
 #include "rad_internal.h"
@@ -4273,7 +4274,8 @@ json response_object(const OaiRequest& r, const char* status, const json& output
 
 int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string* chat,
                       std::string* echo, ApiError* err,
-                      std::map<std::string, std::pair<std::string, std::string>>* ns) {
+                      std::map<std::string, std::pair<std::string, std::string>>* ns,
+                      std::set<std::string>* custom) {
     json b;
     RAD_TRY(parse_request_object(body, lim, &b, err));
     auto prev = b.find("previous_response_id");
@@ -4392,7 +4394,17 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
                     prev = &msgs.back();
                 }
                 (*prev)["tool_calls"].push_back(std::move(call));
-            } else if (type == "function_call_output") {
+            } else if (type == "custom_tool_call") {
+                /* A freeform custom tool's call: its raw input as the arguments (oai_custom_tools.h). */
+                json call;
+                RAD_TRY(custom_tools::input_call(item, &call, err));
+                json* prev = last_assistant();
+                if (!prev) {
+                    msgs.push_back(json{ { "role", "assistant" }, { "content", "" } });
+                    prev = &msgs.back();
+                }
+                (*prev)["tool_calls"].push_back(std::move(call));
+            } else if (type == "function_call_output" || type == "custom_tool_call_output") {
                 const json out = item.contains("output") ? item.at("output") : json("");
                 json content;
                 if (out.is_string()) {
@@ -4439,8 +4451,9 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
     /* Function tools, and the function tools a namespace groups (Codex sends every MCP server's
      * tools that way), flattened to "<namespace>__<name>": the chat path has one flat list, and
      * the reply's function_call items report the two apart again (OaiRequest::tool_namespace).
-     * Built-in tools (web search, file search, computer use) and freeform custom tools have no
-     * chat-completions counterpart and are left out. */
+     * Freeform custom tools are offered as a function tool taking one string `input`, and their
+     * names collected for the reply (oai_custom_tools.h). Built-in tools (web search, file
+     * search, computer use) have no chat-completions counterpart and are left out. */
     json echo_tools = json::array();
     auto tit = b.find("tools");
     if (tit != b.end() && tit->is_array()) {
@@ -4479,6 +4492,13 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
                     return RAD_E_INVAL;
                 }
                 for (const json& f : *inner) {
+                    if (str_or(f, "type") == "custom") {
+                        json fn;
+                        RAD_TRY(custom_tools::as_function(f, &fn, err, "tools[].tools[].name"));
+                        RAD_TRY(add(fn, space));
+                        if (custom) custom->insert(space + "__" + fn.at("name").get<std::string>());
+                        continue;
+                    }
                     if (str_or(f, "type") != "function") {
                         RAD_DEBUG("responses: tool of type \"%s\" in namespace \"%s\" left out: "
                                   "no chat equivalent", str_or(f, "type", "?").c_str(),
@@ -4487,6 +4507,14 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
                     }
                     RAD_TRY(add(f, space));
                 }
+                echo_tools.push_back(t);
+                continue;
+            }
+            if (type == "custom") {
+                json fn;
+                RAD_TRY(custom_tools::as_function(t, &fn, err, "tools[].name"));
+                RAD_TRY(add(fn, ""));
+                if (custom) custom->insert(fn.at("name").get<std::string>());
                 echo_tools.push_back(t);
                 continue;
             }
@@ -4509,7 +4537,7 @@ int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string
             return RAD_E_INVAL;
         if (!space.empty()) name = space + "__" + name;
         if (!tc->is_object()) o["tool_choice"] = *tc;
-        else if (type == "function")
+        else if (type == "function" || type == "custom")   /* custom: oai_custom_tools.h */
             o["tool_choice"] = json{ { "type", "function" }, { "function", { { "name", name } } } };
         else o["tool_choice"] = type;
     }
@@ -4559,7 +4587,10 @@ std::string responses_body(const OaiRequest& r, const ChoiceOut& c, const UsageO
         out.push_back(reasoning_item(random_id("rs_"), c.msg.reasoning, "completed"));
     if (!c.msg.content.empty())
         out.push_back(message_item(random_id("msg_"), c.msg.content, "completed"));
-    for (const ToolCall& tc : c.msg.tool_calls) out.push_back(call_item(r, tc, "completed"));
+    for (const ToolCall& tc : c.msg.tool_calls)
+        out.push_back(custom_tools::is_custom(r, tc)
+                          ? custom_tools::item(r, tc, "completed", custom_tools::input_of(tc.arguments))
+                          : call_item(r, tc, "completed"));
     const bool cut = c.finish == Finish::Length;
     return response_object(r, cut ? "incomplete" : "completed", out, &u,
                            cut ? "max_output_tokens" : nullptr).dump();
@@ -4613,9 +4644,12 @@ void ResponsesStream::open(std::string& out, Item k, size_t call) {
     } else {
         call_ = call;
         const ToolCall& tc = last_.tool_calls[call];
-        item_id_ = fc_id(tc.id);
+        const bool custom = custom_tools::is_custom(*r_, tc);
+        item_id_ = custom ? custom_tools::item_id(tc.id) : fc_id(tc.id);
         event(out, "response.output_item.added",
-              json{ { "output_index", at }, { "item", call_item(*r_, tc, "in_progress") } });
+              json{ { "output_index", at },
+                    { "item", custom ? custom_tools::item(*r_, tc, "in_progress", "")
+                                     : call_item(*r_, tc, "in_progress") } });
     }
 }
 
@@ -4645,9 +4679,21 @@ void ResponsesStream::close(std::string& out) {
          * the terminal response does not run it with truncated arguments. */
         const ToolCall& tc = last_.tool_calls[call_];
         const bool cut = finished_ && last_.open_call && call_ + 1 == last_.tool_calls.size();
-        event(out, "response.function_call_arguments.done",
-              json{ { "item_id", item_id_ }, { "output_index", at }, { "arguments", tc.arguments } });
-        item = call_item(*r_, tc, cut ? "incomplete" : "completed");
+        if (custom_tools::is_custom(*r_, tc)) {
+            /* A custom tool's input is sent whole, at the call's end; a call cut short has none
+             * (oai_custom_tools.h). */
+            const std::string input = cut ? std::string() : custom_tools::input_of(tc.arguments);
+            if (!cut)
+                event(out, "response.custom_tool_call_input.delta",
+                      json{ { "item_id", item_id_ }, { "output_index", at }, { "delta", input } });
+            event(out, "response.custom_tool_call_input.done",
+                  json{ { "item_id", item_id_ }, { "output_index", at }, { "input", input } });
+            item = custom_tools::item(*r_, tc, cut ? "incomplete" : "completed", input);
+        } else {
+            event(out, "response.function_call_arguments.done",
+                  json{ { "item_id", item_id_ }, { "output_index", at }, { "arguments", tc.arguments } });
+            item = call_item(*r_, tc, cut ? "incomplete" : "completed");
+        }
     }
     event(out, "response.output_item.done", json{ { "output_index", at }, { "item", item } });
     items_.push_back(std::move(item));
@@ -4679,6 +4725,8 @@ std::string ResponsesStream::emit(const std::vector<ReplyDelta>& ev) {
             open(out, Item::Call, last_.tool_calls.size() - 1);
             break;
         case ReplyDelta::CallArgs:
+            if (call_ < last_.tool_calls.size() && custom_tools::is_custom(*r_, last_.tool_calls[call_]))
+                break;   /* a custom tool's input is sent whole, at its end */
             event(out, "response.function_call_arguments.delta",
                   json{ { "item_id", item_id_ }, { "output_index", at() }, { "delta", d.text } });
             break;

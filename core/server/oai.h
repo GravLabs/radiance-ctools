@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,9 @@ struct OaiRequest {
      * name ("<namespace>__<name>") to its namespace and name, which a function_call item reports
      * apart. Empty for the other shapes. */
     std::map<std::string, std::pair<std::string, std::string>> tool_namespace;
+    /* The Responses API's freeform custom tools, by flattened name: a call to one is answered as
+     * a custom_tool_call item (oai_custom_tools.h). Empty for the other shapes. */
+    std::set<std::string> tool_custom;
     /* llama-server's native /completion: the generated token ids beside the text. */
     bool            return_tokens = false;
     /* The reasoning block's closer when the reply starts inside the block, else "": the stop
@@ -524,10 +528,13 @@ std::string anthropic_error_body(const ApiError& e);
  * holds the request fields the response object repeats. previous_response_id needs server-side
  * storage and is refused; non-function tool types have no chat equivalent and are dropped, as
  * llama-server does. A namespace's function tools are flattened to "<namespace>__<name>", and
- * `*ns` (when given) maps each flattened name back for the reply's function_call items. */
+ * `*ns` (when given) maps each flattened name back for the reply's function_call items.
+ * Freeform custom tools are offered as a function tool taking one string `input`
+ * (oai_custom_tools.h); `*custom` (when given) collects their flattened names. */
 int responses_to_chat(const std::string& body, const OaiLimits& lim, std::string* chat,
                       std::string* echo, ApiError* err,
-                      std::map<std::string, std::pair<std::string, std::string>>* ns = nullptr);
+                      std::map<std::string, std::pair<std::string, std::string>>* ns = nullptr,
+                      std::set<std::string>* custom = nullptr);
 std::string responses_body(const OaiRequest& r, const ChoiceOut& c, const UsageOut& u);
 
 /* Anthropic's stop_reason for a finish and the stop string that caused it. */

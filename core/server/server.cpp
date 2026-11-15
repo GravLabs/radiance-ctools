@@ -1691,11 +1691,13 @@ HttpResponse Server::handle_responses(const HttpRequest& req) {
     ApiError err;
     OaiRequest r;
     std::map<std::string, std::pair<std::string, std::string>> ns;
-    if (responses_to_chat(req.body, lim_, &chat, &echo, &err, &ns) < 0 ||
+    std::set<std::string> custom;   /* freeform custom tools (oai_custom_tools.h) */
+    if (responses_to_chat(req.body, lim_, &chat, &echo, &err, &ns, &custom) < 0 ||
         parse_chat_request(chat, odeps_, lim_, &r, &err) < 0)
         return error_response(err, req.peer);
     r.shape = ApiShape::Responses;
     r.tool_namespace = std::move(ns);
+    r.tool_custom = std::move(custom);
     r.id = random_id("resp_");
     r.echo_json = std::move(echo);
     return serve(req, r);

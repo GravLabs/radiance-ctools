@@ -4362,11 +4362,11 @@ TEST(a_namespaces_tools_are_offered_flat_and_answered_apart) {
                  {"type":"function_call_output","call_id":"c1","output":"y"}]})",
         lim, &chat, &echo, &e, &ns));
     const json c = json::parse(chat);
-    CHECK_EQ(c["tools"].size(), (size_t)2);                       /* the custom tool left out */
+    CHECK_EQ(c["tools"].size(), (size_t)3);   /* the custom tool offered too (custom_tools_test.cpp) */
     CHECK_EQ(c["tools"][1]["function"].value("name", ""), std::string("crm__find"));
     CHECK_EQ(c["messages"][1]["tool_calls"][0]["function"].value("name", ""), std::string("crm__find"));
     CHECK_EQ(c["tool_choice"]["function"].value("name", ""), std::string("crm__find"));
-    CHECK_EQ(ns.size(), (size_t)1);
+    CHECK_EQ(ns.size(), (size_t)2);                               /* crm__find and crm__raw */
     CHECK_EQ(ns["crm__find"].first, std::string("crm"));
     CHECK_EQ(json::parse(echo)["tools"].size(), (size_t)2);      /* echoed as sent */
 
