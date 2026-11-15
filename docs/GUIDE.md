@@ -2786,31 +2786,49 @@ response object, not output. A reply cut at
 function tools a `namespace` groups (Codex sends every MCP server's tools that way), named
 `<namespace>__<name>`: the reply's `function_call` item carries `namespace` and `name` apart, and a
 `function_call` input item or a `tool_choice` naming a namespace is joined back the same way. Two
-tools that would share a name are refused. Freeform custom tools (`"type": "custom"`, Codex's
+tools of the request's that would share a name are refused. Freeform custom tools (`"type": "custom"`, Codex's
 `apply_patch`) are offered as a function tool taking one string `input`, with a grammar `format`
 shown to the model as text in its description; the reply's call to one is a `custom_tool_call` item
 (`ctc_...` id, `call_id`, `name`, the raw `input`), streamed as
 `response.custom_tool_call_input.delta` and `.done` with the input sent whole at the call's end, and
 a `custom_tool_call` input item becomes the call it was (an `input` that is not a string reads as
-`""`). A custom tool inside a `namespace` is offered as Strata offers it, named
-`<namespace>.<name>` with the namespace's description leading its own, and its `custom_tool_call`
-item carries `namespace` and `name` apart. A `tool_choice` of the `custom` form is `auto`, as in
-Strata: the model may call the tool, and is not made to. Codex's `additional_tools` input items add
-their tools after the request's own and nothing to the conversation; the response echoes the
-request's own `tools`. Built-in tools (web search, file search, computer use) are left out, as in
-llama-server.
+`""`, a `call_id` passes as sent, and a `namespace` that is set joins the name). A custom tool
+inside a `namespace` is offered as Strata offers it, named `<namespace>.<name>` with the
+namespace's description leading its own, and its `custom_tool_call` item carries `namespace` and
+`name` apart. Codex's `additional_tools` input items add their tools after the request's own and
+nothing to the conversation; a tool an item names again replaces the earlier one; the response
+echoes the request's own `tools`. A turn's tool results are put in the order of its calls (by
+`call_id`), as the template places them by position. A `tool_choice` the request cannot honour (a
+name it offers no tool of, an unknown shape, the `custom` form, `"required"` with no tools) acts as
+`"auto"` rather than failing the request, and `"required"` with one tool calls that tool. Built-in
+tools (web search, file search, computer use) are left out, as in llama-server. Codex's own context
+compaction, with a provider that is not OpenAI, is an ordinary request (`tools: []`, the compaction
+prompt last) and is served as one.
 
-Custom tools follow Strata's `serve/responses.py`, which they were ported from (MIT), and
-`tests/custom_tools_test.cpp` checks them against Strata's own answers. The differences are where
-Radiance keeps its existing behaviour for every tool: a namespace's function tools are named
-`<namespace>__<name>` (Strata: `<namespace>.<name>`); `tool_choice` `"none"` sends the tools with
-`"none"` (Strata sends none); a reply that ends inside a call is, not streamed, the model's text
-(Strata: an `incomplete` call item; the streams agree); `function_call_arguments.done` does not
-repeat the function's name, and reasoning text is streamed inside `content_part` events; two tools
-of one name, a non-string `call_id` or `namespace`, a tool without a type and a namespace member
-of another kind are refused or left out as for function tools (Strata lets the last tool of a name
-win, passes the fields through, and refuses the last two); errors name their parameter as
-`tools[].name`, not `tools[0].name`. Strata's Codex compaction is not served.
+The Responses tool path follows Strata's `serve/responses.py` and `serve/frontend.py`, which it
+was ported from (MIT), and `tests/custom_tools_test.cpp` checks it against Strata's own answers.
+The differences are where Radiance keeps its existing (1.17.0) behaviour for function tools:
+- a namespace's function tools are named `<namespace>__<name>` (Strata: `<namespace>.<name>`), and
+  keep their own description (Strata leads it with the namespace's);
+- a function tool without a description or parameters is offered without a description and with
+  `{}` (Strata: `""` and `{"type":"object","properties":{}}`);
+- a namespace member without a type is left out (Strata offers it as a function tool), as is a
+  tool without a type (Strata refuses it) and a namespace member of another kind (Strata refuses
+  it);
+- `tool_choice` `"none"` sends the tools with `"none"` (Strata sends none), and a `tool_choice`
+  naming a namespace's function (`namespace` and `name`) calls it (Strata does not read `namespace`
+  there, so it acts as `"auto"`);
+- a reply that ends inside a call is, not streamed, the model's text (Strata: an `incomplete` call
+  item; the streams agree);
+- `function_call_arguments.done` does not repeat the function's name, and reasoning text is
+  streamed inside `content_part` events;
+- two tools of one name in the request's own `tools` are refused (Strata lets the last win), and a
+  tool an `additional_tools` item names again is offered once, as its last definition (Strata
+  offers each definition);
+- an output item's non-string `call_id` is refused, as a `function_call_output`'s is;
+- errors name their parameter as `tools[].name`, not `tools[0].name`.
+Strata's prompt cache for Codex compactions (off by default there: it renders a compaction with
+its conversation's tools, to reuse the cached prompt) is not ported.
 Responses are not stored, so `previous_response_id` is refused: send the conversation as `input`.
 What a response object cannot carry is refused: `n` other than 1, and logprobs (`include` naming
 `message.output_text.logprobs`, `top_logprobs`, `logprobs`, `n_probs`), which
